@@ -89,5 +89,3 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 - **Umair Zubair**
 - GitHub: [@umairzubair](https://github.com/umairzubair)
-- Website: [www.umairzubair.com](https://www.umairzubair.com) *(Optional)*
-- Twitter: [@umair_zubair](https://twitter.com/umair_zubair) *(Optional)*

@@ -1,51 +1,45 @@
 <?php
-    /*
+/*
 Plugin Name: Email OTP Verification
 Description: Replaces Theme My Login's email link verification with email-based OTP verification.
-Version: 1.0
+Version: 1.4
 Author: Umair Zubair
 */
 
-    if (! defined('ABSPATH')) {
-        exit;
+if(!defined('ABSPATH')) exit;
+
+class WPOtpVerification {
+
+    const TABLE_NAME = 'wp_otp_verification';
+
+    public function __construct() {
+        register_activation_hook(__FILE__, [$this, 'create_table']);
+        add_action('plugins_loaded', [$this, 'maybe_create_table']);
+        add_action('user_register', [$this, 'on_user_register'], 10, 1);
+
+        // Add shortcode for OTP form
+        add_shortcode('otp_verification_form', [$this, 'otp_verification_form_shortcode']);
+
+        // Handle OTP submission (AJAX or POST)
+        add_action('wp_ajax_nopriv_verify_otp', [$this, 'handle_otp_verification']);
+        add_action('wp_ajax_verify_otp', [$this, 'handle_otp_verification']);
+
+        // Handle AJAX resend OTP
+        add_action('wp_ajax_nopriv_resend_otp', [$this, 'handle_resend_otp']);
+        add_action('wp_ajax_resend_otp', [$this, 'handle_resend_otp']);
     }
 
-    class WPOtpVerification
-    {
+    public function get_table_name() {
+        global $wpdb;
+        return $wpdb->prefix . 'otp_verification';
+    }
 
-        const TABLE_NAME = 'wp_otp_verification';
+    public function create_table() {
+        global $wpdb;
+        $table_name = $this->get_table_name();
+        $charset_collate = $wpdb->get_charset_collate();
 
-        public function __construct()
-        {
-            register_activation_hook(__FILE__, [$this, 'create_table']);
-            add_action('plugins_loaded', [$this, 'maybe_create_table']);
-            add_action('user_register', [$this, 'on_user_register'], 10, 1);
-
-            // Add shortcode for OTP form
-            add_shortcode('otp_verification_form', [$this, 'otp_verification_form_shortcode']);
-
-            // Handle OTP submission (AJAX or POST)
-            add_action('wp_ajax_nopriv_verify_otp', [$this, 'handle_otp_verification']);
-            add_action('wp_ajax_verify_otp', [$this, 'handle_otp_verification']);
-
-            // Handle AJAX resend OTP
-            add_action('wp_ajax_nopriv_resend_otp', [$this, 'handle_resend_otp']);
-            add_action('wp_ajax_resend_otp', [$this, 'handle_resend_otp']);
-        }
-
-        public function get_table_name()
-        {
-            global $wpdb;
-            return $wpdb->prefix . 'otp_verification';
-        }
-
-        public function create_table()
-        {
-            global $wpdb;
-            $table_name      = $this->get_table_name();
-            $charset_collate = $wpdb->get_charset_collate();
-
-            $sql = "CREATE TABLE IF NOT EXISTS $table_name (
+        $sql = "CREATE TABLE IF NOT EXISTS $table_name (
             id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
             user_id BIGINT(20) UNSIGNED NOT NULL,
             email VARCHAR(255) NOT NULL,
@@ -57,57 +51,76 @@ Author: Umair Zubair
             UNIQUE KEY user_id (user_id)
         ) $charset_collate;";
 
-            require_once ABSPATH . 'wp-admin/includes/upgrade.php';
-            dbDelta($sql);
+        require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+        dbDelta($sql);
+    }
+
+    public function maybe_create_table() {
+        global $wpdb;
+        $table = $this->get_table_name();
+        if($wpdb->get_var("SHOW TABLES LIKE '$table'") != $table) {
+            $this->create_table();
+        }
+    }
+
+    public function on_user_register($user_id) {
+        $user = get_userdata($user_id);
+        if(!$user) return;
+
+        // Generate OTP
+        $otp = rand(100000, 999999);
+        $expires = '2099-12-31 23:59:59';
+
+        // Store in otp table
+        global $wpdb;
+        $wpdb->replace($this->get_table_name(), [
+            'user_id'    => $user_id,
+            'email'      => $user->user_email,
+            'otp_code'   => $otp,
+            'expires_at' => $expires,
+            'verified'   => 0
+        ]);
+
+        // Save OTP and expiry to user meta
+        update_user_meta($user_id, 'email_otp', $otp);
+        update_user_meta($user_id, 'email_otp_expiry', $expires);
+
+        // Prepare email
+        $first_name = get_user_meta($user_id, 'first_name', true);
+        if (!$first_name) {
+            $nickname = get_user_meta($user_id, 'nickname', true);
+            $first_name = $nickname ? $nickname : 'User';
         }
 
-        public function maybe_create_table()
-        {
-            global $wpdb;
-            $table = $this->get_table_name();
-            if ($wpdb->get_var("SHOW TABLES LIKE '$table'") != $table) {
-                $this->create_table();
-            }
+        $subject = 'Your Captain Forest Login Code';
+        $body = "Hello {$first_name},\n\n";
+        $body .= "Here is your single use login code for Captain Forest: {$otp}\n\n";
+        $body .= "This code is valid for the next 10 minutes.\n\n";
+        $body .= "If you did not request a login code from Captain Forest, please ignore this email.\n";
+
+        // Send OTP email
+        wp_mail(
+            $user->user_email,
+            $subject,
+            $body
+        );
+    }
+
+    // Helper for url-safe base64 decode
+    private function base64_urlsafe_decode($input) {
+        $input = strtr($input, '-_,', '+/=');
+        $remainder = strlen($input) % 4;
+        if ($remainder) {
+            $padlen = 4 - $remainder;
+            $input .= str_repeat('=', $padlen);
         }
+        return base64_decode($input);
+    }
 
-        public function on_user_register($user_id)
-        {
-            $user = get_userdata($user_id);
-            if (! $user) {
-                return;
-            }
-
-            // Generate OTP
-            $otp     = rand(100000, 999999);
-            $expires = '2099-12-31 23:59:59';
-
-            // Store in otp table
-            global $wpdb;
-            $wpdb->replace($this->get_table_name(), [
-                'user_id'    => $user_id,
-                'email'      => $user->user_email,
-                'otp_code'   => $otp,
-                'expires_at' => $expires,
-                'verified'   => 0,
-            ]);
-
-            // Save OTP and expiry to user meta
-            update_user_meta($user_id, 'email_otp', $otp);
-            update_user_meta($user_id, 'email_otp_expiry', $expires);
-
-            // Send OTP email
-            wp_mail(
-                $user->user_email,
-                'Your OTP Code',
-                "Your verification code is: $otp"
-            );
-        }
-
-        // Shortcode for OTP verification form
-        public function otp_verification_form_shortcode($atts)
-        {
-            $user_id = isset($_GET['user_id']) ? intval($_GET['user_id']) : get_current_user_id();
-            ob_start();
+    // Shortcode for OTP verification form
+    public function otp_verification_form_shortcode($atts) {
+        $user_id = isset($_GET['user_id']) ? intval($_GET['user_id']) : get_current_user_id();
+        $ref_url = isset($_GET['ref_url']) ? sanitize_text_field($_GET['ref_url']) : '';
         ?>
         <style>
         .otp-verification-wrapper {
@@ -121,7 +134,7 @@ Author: Umair Zubair
         }
         .otp-verification-wrapper h2 {
             text-align:center;
-            margin-bottom: 24px;
+            margin-bottom: 16px;
             color: #30bea7;
             letter-spacing: 1px;
             font-size: 2rem;
@@ -137,7 +150,7 @@ Author: Umair Zubair
         .otp-input {
             width: 100%;
             padding: 15px 15px;
-            border-radius: 7px;
+            border-radius: 0; /* straight corners */
             border: 1px solid #d7e1ec;
             font-size: 1.15rem;
             margin-bottom: 18px;
@@ -150,18 +163,23 @@ Author: Umair Zubair
         }
         .otp-btn {
             width: 100%;
-            background: linear-gradient(90deg,#30bea7 0%, #4ecca3 100%);
+            background: #17B794 !important;
             color: #fff;
             border: none;
-            border-radius: 6px;
+            border-radius: 0 !important; /* straight corners */
             padding: 12px 0;
             font-size: 1.13rem;
             font-weight: 600;
             cursor: pointer;
             transition: background 0.2s;
         }
-        .otp-btn:hover {
-            background: linear-gradient(90deg,#22a08c 0%, #3ea77f 100%);
+        .otp-btn:disabled {
+            background: #cccccc !important;
+            color: #fff;
+            cursor: not-allowed;
+        }
+        .otp-btn:hover:enabled {
+            background: #13a384 !important;
         }
         .otp-resend-btn {
             width: 100%;
@@ -175,7 +193,11 @@ Author: Umair Zubair
             transition: color 0.2s;
             padding: 0;
         }
-        .otp-resend-btn:hover {
+        .otp-resend-btn:disabled {
+            color: #bbbbbb;
+            cursor: not-allowed;
+        }
+        .otp-resend-btn:hover:enabled {
             color: #22a08c;
         }
         #otp-verification-message {
@@ -184,23 +206,110 @@ Author: Umair Zubair
             font-size: 1.08em;
             color: #d13e3e;
         }
+        #otp-verification-message.success {
+            color: #000;
+        }
+        .otp-timer {
+            margin-bottom: 12px;
+            text-align: center;
+            font-size: 1.08em;
+            color: #30bea7;
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
         </style>
+        <?php
+        // For debug, print the decoded ref_url (1 level deep)
+        if ($ref_url) {
+            // $decoded = $this->base64_urlsafe_decode($ref_url);
+            // ?>
+            <!-- <div class="debug-refurl">
+            <strong>Debug Ref URL:</strong><br> -->
+             <?php
+            //     echo esc_html($ref_url);
+            //     if ($decoded && preg_match('/^https?:\/\//', $decoded)) {
+            //         echo "<br><small>(decoded: " . esc_html($decoded) . ")</small>";
+            //     }
+            //     ?>
+            <!-- </div> -->
+            <?php
+        }
+        ?>
         <div class="otp-verification-wrapper">
             <h2>Verify OTP</h2>
+            <div class="otp-timer" id="otp-timer">10:00</div>
             <form id="otp-verification-form" method="post" autocomplete="off">
                 <label for="otp_code" class="otp-label">Enter the OTP sent to your email:</label>
                 <input type="text" name="otp_code" id="otp_code" maxlength="6" required class="otp-input" placeholder="6-digit code">
                 <input type="hidden" name="user_id" value="<?php echo esc_attr($user_id); ?>">
-                <button type="submit" class="otp-btn">Verify</button>
+                <input type="hidden" id="ref_url" name="ref_url" value="<?php echo esc_attr($ref_url); ?>">
+                <button type="submit" class="otp-btn" id="otp-verify-btn">Verify</button>
                 <button type="button" id="resend-otp-btn" class="otp-resend-btn">Resend OTP</button>
             </form>
             <div id="otp-verification-message"></div>
         </div>
         <script>
+        // OTP Timer (Fake 10 Minutes)
+        (function(){
+            var timerDisplay = document.getElementById('otp-timer');
+            var otpField = document.getElementById('otp_code');
+            var verifyBtn = document.getElementById('otp-verify-btn');
+            var resendBtn = document.getElementById('resend-otp-btn');
+            var totalSeconds = 600; // 10 minutes
+
+            function pad(n) { return n < 10 ? '0' + n : n; }
+            function updateTimer() {
+                var minutes = Math.floor(totalSeconds / 60);
+                var seconds = totalSeconds % 60;
+                timerDisplay.textContent = pad(minutes) + ':' + pad(seconds);
+                if(totalSeconds <= 0) {
+                    timerDisplay.textContent = "OTP expired. Please resend OTP.";
+                    otpField.disabled = true;
+                    verifyBtn.disabled = true;
+                    resendBtn.disabled = false;
+                } else {
+                    totalSeconds--;
+                    setTimeout(updateTimer, 1000);
+                }
+            }
+            // Start timer
+            updateTimer();
+
+            // Initially enable/disable buttons
+            otpField.disabled = false;
+            verifyBtn.disabled = false;
+            resendBtn.disabled = false;
+        })();
+
         jQuery(document).ready(function($){
             $('#otp-verification-form').on('submit', function(e){
                 e.preventDefault();
                 var form = $(this);
+                var ref_url = $('#ref_url').val();
+
+                // PHP's base64 decode logic ported to JS for redirect
+                function base64_urlsafe_decode(input) {
+                    input = input.replace(/[-_,]/g, function(m) {
+                        return {'-':'+','_':'/','=':''}[m];
+                    });
+                    var pad = input.length % 4;
+                    if (pad) input += "====".slice(pad);
+                    // atob may throw, so wrap in try/catch
+                    try { return atob(input); } catch(e) { return ""; }
+                }
+
+                // Check for plan_id=2 in decoded URL
+                function hasPlanId2(url) {
+                    if (!url) return false;
+                    try {
+                        var parsed = new URL(url);
+                        return parsed.searchParams.get('plan_id') === '2';
+                    } catch (e) {
+                        // fallback to string search if invalid URL
+                        return url.indexOf('plan_id=2') !== -1;
+                    }
+                }
+
                 $.ajax({
                     url: '<?php echo admin_url('admin-ajax.php'); ?>',
                     type: 'POST',
@@ -210,16 +319,30 @@ Author: Umair Zubair
                         user_id: form.find('input[name="user_id"]').val()
                     },
                     success: function(response) {
-                        $('#otp-verification-message').text(response.data && response.data.message ? response.data.message : 'No message');
+                        var msg = response.data && response.data.message ? response.data.message : 'No message';
                         if(response.success) {
+                            $('#otp-verification-message').text(msg).addClass('success');
                             form.hide();
                             setTimeout(function(){
-                                window.location.href = '/tds-my-account/';
+                                if(ref_url) {
+                                    var decoded = base64_urlsafe_decode(ref_url);
+                                    if(decoded && hasPlanId2(decoded)) {
+                                        window.location.href = '/tds-my-account/';
+                                    } else if(decoded && /^https?:\/\//.test(decoded)) {
+                                        window.location.href = decoded;
+                                    } else {
+                                        window.location.href = '/tds-my-account/';
+                                    }
+                                } else {
+                                    window.location.href = '/tds-my-account/';
+                                }
                             }, 1000);
+                        } else {
+                            $('#otp-verification-message').removeClass('success').text(msg);
                         }
                     },
                     error: function() {
-                        $('#otp-verification-message').text('An error occurred.');
+                        $('#otp-verification-message').removeClass('success').text('An error occurred.');
                     }
                 });
             });
@@ -237,11 +360,16 @@ Author: Umair Zubair
                         user_id: form.find('input[name="user_id"]').val()
                     },
                     success: function(response) {
-                        $('#otp-verification-message').text(response.data && response.data.message ? response.data.message : 'No message');
+                        $('#otp-verification-message').removeClass('success').text(response.data && response.data.message ? response.data.message : 'No message');
+                        // Re-enable OTP field and timer
+                        $('#otp_code').prop('disabled', false);
+                        $('#otp-verify-btn').prop('disabled', false);
                         btn.prop('disabled', false).text('Resend OTP');
+                        // Restart timer (reload page or re-initialize timer)
+                        window.location.reload();
                     },
                     error: function() {
-                        $('#otp-verification-message').text('An error occurred.');
+                        $('#otp-verification-message').removeClass('success').text('An error occurred.');
                         btn.prop('disabled', false).text('Resend OTP');
                     }
                 });
@@ -249,172 +377,194 @@ Author: Umair Zubair
         });
         </script>
         <?php
-            return ob_get_clean();
-                }
+        return ob_get_clean();
+    }
 
-                // Handle OTP verification (AJAX)
-                public function handle_otp_verification()
-                {
-                    global $wpdb;
-                    $user_id  = intval($_POST['user_id'] ?? 0);
-                    $otp_code = sanitize_text_field($_POST['otp_code'] ?? '');
+    // Handle OTP verification (AJAX)
+    public function handle_otp_verification() {
+        global $wpdb;
+        $user_id = intval($_POST['user_id'] ?? 0);
+        $otp_code = sanitize_text_field($_POST['otp_code'] ?? '');
 
-                    $debug = [
-                        'user_id'    => $user_id,
-                        'otp_code'   => $otp_code,
-                        'table_name' => $this->get_table_name(),
-                    ];
+        $debug = [
+            'user_id' => $user_id,
+            'otp_code' => $otp_code,
+            'table_name' => $this->get_table_name(),
+        ];
 
-                    if (! $user_id || ! $otp_code) {
-                        $debug['error'] = 'Missing data';
-                        wp_send_json_error([
-                            'message' => 'Missing data.',
-                            'debug'   => $debug,
-                        ]);
-                    }
+        if(!$user_id || !$otp_code) {
+            $debug['error'] = 'Missing data';
+            wp_send_json_error([
+                'message' => 'Missing data.',
+                'debug' => $debug,
+            ]);
+        }
 
-                    // Remove expiry check: do not check expires_at
-                    $sql = $wpdb->prepare(
-                        "SELECT * FROM {$this->get_table_name()} WHERE user_id = %d AND otp_code = %s",
-                        $user_id, $otp_code
-                    );
-                    $debug['sql'] = $sql;
+        // Remove expiry check: do not check expires_at
+        $sql = $wpdb->prepare(
+            "SELECT * FROM {$this->get_table_name()} WHERE user_id = %d AND otp_code = %s",
+            $user_id, $otp_code
+        );
+        $debug['sql'] = $sql;
 
-                    $row          = $wpdb->get_row($sql);
-                    $debug['row'] = $row;
+        $row = $wpdb->get_row($sql);
+        $debug['row'] = $row;
 
-                    if ($row && ! $row->verified) {
-                        $wpdb->update(
-                            $this->get_table_name(),
-                            ['verified' => 1],
-                            ['id' => $row->id]
-                        );
+        if($row && !$row->verified) {
+            $wpdb->update(
+                $this->get_table_name(),
+                ['verified' => 1],
+                ['id' => $row->id]
+            );
 
-                        // TDS verification block
-                        $tds_validate = get_user_meta($user_id, 'tds_validate', true);
-                        if (! is_array($tds_validate)) {
-                            $tds_validate = @unserialize($tds_validate); // fallback, just in case
-                        }
-                        if (is_array($tds_validate)) {
-                            $tds_validate['validation_time'] = time();
-                            update_user_meta($user_id, 'tds_validate', $tds_validate);
-                        }
-
-                        $debug['success'] = true;
-                        wp_send_json_success([
-                            'message' => 'Your email has been verified!',
-                            'debug'   => $debug,
-                        ]);
-                    } else {
-                        $debug['fail'] = true;
-                        wp_send_json_error([
-                            'message' => 'Invalid OTP.',
-                            'debug'   => $debug,
-                        ]);
-                    }
-                }
-
-                // AJAX handler for resending OTP
-                public function handle_resend_otp()
-                {
-                    $user_id = intval($_POST['user_id'] ?? 0);
-                    if (! $user_id) {
-                        wp_send_json_error(['message' => 'User ID missing.']);
-                    }
-                    $user = get_userdata($user_id);
-                    if (! $user) {
-                        wp_send_json_error(['message' => 'User not found.']);
-                    }
-
-                    // Generate new OTP and far future expiry
-                    $otp     = rand(100000, 999999);
-                    $expires = '2099-12-31 23:59:59';
-
-                    global $wpdb;
-                    // Remove previous OTP for this user
-                    $wpdb->delete($this->get_table_name(), ['user_id' => $user_id]);
-                    // Insert new OTP
-                    $wpdb->insert($this->get_table_name(), [
-                        'user_id'    => $user_id,
-                        'email'      => $user->user_email,
-                        'otp_code'   => $otp,
-                        'expires_at' => $expires,
-                        'verified'   => 0,
-                    ]);
-                    update_user_meta($user_id, 'email_otp', $otp);
-                    update_user_meta($user_id, 'email_otp_expiry', $expires);
-
-                    // Send email
-                    wp_mail(
-                        $user->user_email,
-                        'Your New OTP Code',
-                        "Your new verification code is: $otp"
-                    );
-
-                    wp_send_json_success(['message' => 'A new OTP has been sent to your email.']);
-                }
+            // TDS verification block
+            $tds_validate = get_user_meta($user_id, 'tds_validate', true);
+            if (!is_array($tds_validate)) {
+                $tds_validate = @unserialize($tds_validate); // fallback, just in case
+            }
+            if (is_array($tds_validate)) {
+                $tds_validate['validation_time'] = time();
+                update_user_meta($user_id, 'tds_validate', $tds_validate);
             }
 
-            new WPOtpVerification();
+            $debug['success'] = true;
+            wp_send_json_success([
+                'message' => 'Your email has been verified!',
+                'debug' => $debug,
+            ]);
+        } else {
+            $debug['fail'] = true;
+            wp_send_json_error([
+                'message' => 'Invalid OTP.',
+                'debug' => $debug,
+            ]);
+        }
+    }
 
-            // Restriction/redirect logic
-            add_action('template_redirect', function () {
-                $request_uri = $_SERVER['REQUEST_URI'];
+    // AJAX handler for resending OTP
+    public function handle_resend_otp() {
+        $user_id = intval($_POST['user_id'] ?? 0);
+        if(!$user_id) {
+            wp_send_json_error(['message' => 'User ID missing.']);
+        }
+        $user = get_userdata($user_id);
+        if(!$user) {
+            wp_send_json_error(['message' => 'User not found.']);
+        }
 
-                // Restrict verify-otp page for not logged in users
-                if (preg_match('#/verify-otp(/|\?|$)#', $request_uri) && ! is_user_logged_in()) {
-                    wp_redirect(site_url('/tds-login-register/'));
-                    exit;
-                }
+        // Generate new OTP and far future expiry
+        $otp = rand(100000, 999999);
+        $expires = '2099-12-31 23:59:59';
 
-                if (! is_user_logged_in()) {
-                    return;
-                }
+        global $wpdb;
+        // Remove previous OTP for this user
+        $wpdb->delete($this->get_table_name(), ['user_id' => $user_id]);
+        // Insert new OTP
+        $wpdb->insert($this->get_table_name(), [
+            'user_id'    => $user_id,
+            'email'      => $user->user_email,
+            'otp_code'   => $otp,
+            'expires_at' => $expires,
+            'verified'   => 0
+        ]);
+        update_user_meta($user_id, 'email_otp', $otp);
+        update_user_meta($user_id, 'email_otp_expiry', $expires);
 
-                $user_id = get_current_user_id();
+        // Prepare email (same as on register)
+        $first_name = get_user_meta($user_id, 'first_name', true);
+        if (!$first_name) {
+            $nickname = get_user_meta($user_id, 'nickname', true);
+            $first_name = $nickname ? $nickname : 'User';
+        }
 
-                // Fetch and check tds_validate meta
-                $tds_validate = get_user_meta($user_id, 'tds_validate', true);
-                if (! is_array($tds_validate)) {
-                    $tds_validate = @unserialize($tds_validate);
-                }
-                $is_verified = (is_array($tds_validate) && ! empty($tds_validate['validation_time']));
+        $subject = 'Your New Captain Forest Login Code';
+        $body = "Hello {$first_name},\n\n";
+        $body .= "Here is your single use login code for Captain Forest: {$otp}\n\n";
+        $body .= "This code is valid for the next 10 minutes.\n\n";
+        $body .= "If you did not request a login code from Captain Forest, please ignore this email.\n";
 
-                // List of pages to restrict
-                $restricted_slugs = [
-                    'tds-my-account',
-                ];
+        wp_mail(
+            $user->user_email,
+            $subject,
+            $body
+        );
 
-                // Check if restricted page
-                $is_restricted = false;
-                foreach ($restricted_slugs as $slug) {
-                    if (preg_match('#/' . $slug . '(/|\?|$)#', $request_uri)) {
-                        $is_restricted = true;
-                        break;
-                    }
-                }
+        wp_send_json_success(['message' => 'A new OTP has been sent to your email.']);
+    }
+}
 
-                // If not verified and on restricted page, redirect to OTP
-                if ($is_restricted && ! $is_verified) {
-                    wp_redirect(site_url('/verify-otp/?user_id=' . $user_id));
-                    exit;
-                }
+new WPOtpVerification();
 
-                // If already verified and on OTP page, redirect to account page
-                if (
-                    $is_verified &&
-                    preg_match('#/verify-otp(/|\?|$)#', $request_uri)
-                ) {
-                    wp_redirect(site_url('/tds-my-account/'));
-                    exit;
-                }
-            });
+// Restriction/redirect logic
+add_action('template_redirect', function() {
+    $request_uri = $_SERVER['REQUEST_URI'];
 
-            // Add this filter OUTSIDE the class, after instantiation
-            add_filter('tds_email_message_content', function ($message, $user_id, $email_type) {
-                if ($email_type === 'register_email_body') {
-                    $otp     = get_user_meta($user_id, 'email_otp', true);
-                    $message = str_replace('%otp_code%', $otp, $message);
-                }
-            return $message;
-        }, 10, 3);
+    // Restrict verify-otp page for not logged in users
+    if (preg_match('#/verify-otp(/|\?|$)#', $request_uri) && !is_user_logged_in()) {
+        wp_redirect(site_url('/tds-login-register/'));
+        exit;
+    }
+
+    if (!is_user_logged_in()) return;
+
+    $user_id = get_current_user_id();
+
+    // Fetch and check tds_validate meta
+    $tds_validate = get_user_meta($user_id, 'tds_validate', true);
+    if (!is_array($tds_validate)) {
+        $tds_validate = @unserialize($tds_validate);
+    }
+    $is_verified = (is_array($tds_validate) && !empty($tds_validate['validation_time']));
+
+    // List of pages to restrict
+    $restricted_slugs = [
+        'tds-my-account',
+    ];
+
+    // Check if restricted page
+    $is_restricted = false;
+    foreach ($restricted_slugs as $slug) {
+        if (preg_match('#/' . $slug . '(/|\?|$)#', $request_uri)) {
+            $is_restricted = true;
+            break;
+        }
+    }
+
+    // If not verified and on restricted page, redirect to OTP
+    if ($is_restricted && !$is_verified) {
+        $ref_url = isset($_GET['ref_url']) ? sanitize_text_field($_GET['ref_url']) : '';
+        $redirect_url = site_url('/verify-otp/?user_id=' . $user_id);
+        if ($ref_url) {
+            $redirect_url .= '&ref_url=' . urlencode($ref_url);
+        }
+        wp_redirect($redirect_url);
+        exit;
+    }
+
+    // If already verified and on OTP page, redirect to account page
+    if (
+        $is_verified &&
+        preg_match('#/verify-otp(/|\?|$)#', $request_uri)
+    ) {
+        wp_redirect(site_url('/tds-my-account/'));
+        exit;
+    }
+});
+
+// Add this filter OUTSIDE the class, after instantiation
+add_filter('tds_email_message_content', function($message, $user_id, $email_type) {
+    if ($email_type === 'register_email_body') {
+        $otp = get_user_meta($user_id, 'email_otp', true);
+        $first_name = get_user_meta($user_id, 'first_name', true);
+        if (!$first_name) {
+            $nickname = get_user_meta($user_id, 'nickname', true);
+            $first_name = $nickname ? $nickname : 'User';
+        }
+        $content = "Hello {$first_name}\n\n";
+        $content .= "Here is your single use login code for Captain Forest: {$otp}\n";
+        $content .= "This code is valid for next 10 minutes.\n";
+        $content .= "If you did not request a login code from Captain Forest, please ignore this email.\n";
+        $message = $content;
+    }
+    return $message;
+}, 10, 3);

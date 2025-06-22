@@ -1,4 +1,4 @@
-# Email OTP Verification Plugin 
+# Email OTP Verification Plugin
 
 This plugin replaces the email link verification feature of the **Theme My Login** plugin with email-based OTP (One-Time Password) verification, enhancing security and ensuring a seamless user experience during the login process.
 

@@ -6,7 +6,7 @@ Version: 1.4
 Author: Umair Zubair
 */
 
-///////    ////////////   //
+///////    ////////////   /
 if(!defined('ABSPATH')) exit;
 
 class WPOtpVerification {
